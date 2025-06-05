@@ -1,6 +1,9 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import oracledb
+import os
+from dotenv import load_dotenv
+load_dotenv()
 
 app = FastAPI()
 
@@ -23,11 +26,14 @@ app.add_middleware(
 
 # Conexão com o banco Oracle
 conn = oracledb.connect(
-    user="RM558643",
-    password="020106",
-    dsn=oracledb.makedsn("oracle.fiap.com.br", 1521, sid="orcl")
+    user=os.getenv("ORACLE_USER"),
+    password=os.getenv("ORACLE_PASSWORD"),
+    dsn=oracledb.makedsn(
+        os.getenv("ORACLE_HOST"),
+        int(os.getenv("ORACLE_PORT")),
+        sid=os.getenv("ORACLE_SID")
+    )
 )
-
 # Lista de tabelas que o sistema pode acessar
 tabelas_permitidas = ["GS_CIDADE", "GS_BAIRRO", "GS_PREVISAO_TEMPO", "GS_FAMILIARES_DESAPARECIDOS", "GS_NIVEL_ALERTA"]
 

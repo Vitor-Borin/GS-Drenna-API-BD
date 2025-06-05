@@ -1,0 +1,10 @@
+# Ignorar ambiente virtual
+venv/
+__pycache__/
+
+# Ignorar arquivos de configuração pessoal
+.env
+
+# Outros arquivos que você não quer subir
+*.log
+*.sqlite3
