@@ -7,21 +7,20 @@ load_dotenv()
 
 app = FastAPI()
 
-# Configuração CORS
 origins = [
     "http://localhost:8000",
     "http://127.0.0.1:8000",
-    "http://127.0.0.1:5500",  # << Adicione essa linha
-    "http://localhost:5500",   # E se quiser incluir localhost também
+    "http://127.0.0.1:5500", 
+    "http://localhost:5500",  
 ]
 
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,  # libera esses domínios
+    allow_origins=origins,  
     allow_credentials=True,
-    allow_methods=["*"],  # libera todos os métodos (GET, POST, etc)
-    allow_headers=["*"],  # libera todos os headers
+    allow_methods=["*"],  
+    allow_headers=["*"], 
 )
 
 # Conexão com o banco Oracle
