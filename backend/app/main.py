@@ -9,8 +9,9 @@ load_dotenv()
 
 app = FastAPI()
 
+# Permitir todas as origens por enquanto, ajustar conforme necessário
 origins = [
-    "*" # Permitir todas as origens por enquanto, ajustar conforme necessário
+    "*"
 ]
 
 app.add_middleware(
@@ -22,15 +23,17 @@ app.add_middleware(
 )
 
 # Declarar db_pool como None globalmente
+# Agora usaremos a pool SÍNCRONA
 db_pool = None
 
 @app.on_event("startup")
 async def startup_db_pool():
-    """Cria a pool de conexão Oracle ao iniciar a aplicação."""
+    """Cria a pool de conexão Oracle (síncrona) ao iniciar a aplicação."""
     global db_pool
     try:
-        # Usar create_pool_async para pool assíncrona
-        db_pool = await oracledb.create_pool_async(
+        # Usar create_pool para pool SÍNCRONA
+        # Esta função NÃO é assíncrona, não precisa de await
+        db_pool = oracledb.create_pool(
             user=os.getenv("ORACLE_USER"),
             password=os.getenv("ORACLE_PASSWORD"),
             dsn=oracledb.makedsn(
@@ -45,13 +48,11 @@ async def startup_db_pool():
             # getmode=oracledb.POOL_GETMODE_TIMEDWAIT, # Esperar por uma conexão se a pool estiver cheia
             # wait_timeout=5 # Tempo máximo de espera em segundos
         )
-        print("Pool de conexão Oracle criada com sucesso!")
+        print("Pool de conexão Oracle (síncrona) criada com sucesso!")
     except Exception as e:
         # Imprimir a exceção diretamente para depuração
         print(f"Erro ao criar pool de conexão Oracle: {e}")
         # Em um ambiente de produção real, talvez você queira relatar isso de outra forma
-        # Mas para depuração, imprimir é útil. Não vamos setar db_pool para None aqui
-        # para não mascarar o problema do acquire se a pool foi parcialmente criada ou similar.
 
 
 @app.on_event("shutdown")
@@ -59,18 +60,24 @@ async def shutdown_db_pool():
     """Fecha a pool de conexão Oracle ao encerrar a aplicação."""
     global db_pool
     if db_pool:
-        await db_pool.close()
-        print("Pool de conexão Oracle fechada.")
+        # O close da pool síncrona TAMBÉM é síncrono, precisa rodar em thread pool se chamado de contexto assíncrono
+        # No entanto, o evento de shutdown do FastAPI pode rodar código síncrono, então await pode não ser necessário aqui,
+        # mas para garantir que não bloqueie, vamos usar to_thread.
+        await asyncio.to_thread(db_pool.close)
+        print("Pool de conexão Oracle (síncrona) fechada.")
 
 # Função de dependência para obter uma conexão do banco de dados
+# Esta dependência é assíncrona porque 'acquire' (mesmo na pool síncrona)
+# precisa rodar em um thread para não bloquear o loop de eventos.
 async def get_db_connection():
-    """Adquire uma conexão da pool e a libera no final da requisição."""
+    """Adquire uma conexão (síncrona) da pool e a libera no final da requisição."""
     connection = None
     try:
         if db_pool is None:
              # Se a pool não foi criada (erro na inicialização), levanta uma exceção
              raise HTTPException(status_code=500, detail="Database connection pool not initialized.")
-        connection = await db_pool.acquire()
+        # Adquirir a conexão da pool síncrona rodando em um thread
+        connection = await asyncio.to_thread(db_pool.acquire)
         yield connection # Fornece a conexão para o endpoint
     except Exception as e:
         # Tratar erros na aquisição da conexão
@@ -78,55 +85,82 @@ async def get_db_connection():
         raise HTTPException(status_code=500, detail=f"Erro interno ao conectar ao banco de dados: {e}")
     finally:
         if connection:
-            await connection.release() # Garante que a conexão é sempre liberada
+            # Liberar a conexão síncrona rodando em um thread
+            await asyncio.to_thread(connection.release)
 
 
 tabelas_permitidas = ["GS_CIDADE", "GS_BAIRRO", "GS_PREVISAO_TEMPO", "GS_FAMILIARES_DESAPARECIDOS", "GS_NIVEL_ALERTA"]
 
 @app.get("/tabela/{nome_tabela}")
-async def listar_tabela(nome_tabela: str, connection: oracledb.AsyncConnection = Depends(get_db_connection)):
-    """Retorna todos os dados de uma tabela especificada."""
+async def listar_tabela(nome_tabela: str, connection: oracledb.Connection = Depends(get_db_connection)):
+    """Retorna todos os dados de uma tabela especificada (usando conexão síncrona em thread)."""
     nome_tabela = nome_tabela.upper()
 
     if nome_tabela not in tabelas_permitidas:
-        # Se a tabela não é permitida, liberamos a conexão implicitamente pelo finally da dependência
+        # Se a tabela não é permitida, a conexão será liberada pela dependência
         raise HTTPException(status_code=403, detail="Tabela não permitida")
 
-    # Usar a conexão fornecida pela dependência
-    async with connection.cursor() as cursor:
+    # As operações de banco de dados SÍNCRONAS precisam rodar em um thread
+    # para não bloquear o loop de eventos assíncrono do FastAPI.
+    # Usamos asyncio.to_thread para executar código síncrono em um thread separado.
+    try:
+        # Criar cursor síncrono em thread
+        cursor = await asyncio.to_thread(connection.cursor)
         try:
-            # Usar binding para o nome da tabela para maior segurança, embora aqui seja uma lista fixa
-            # Mas para consultas dinâmicas é crucial. Aqui f-string ainda é razoável pela lista fixa.
-            await cursor.execute(f"SELECT * FROM {nome_tabela}")
-            colunas = [col[0] for col in cursor.description]
+            # Executar query síncrona em thread
+            await asyncio.to_thread(cursor.execute, f"SELECT * FROM {nome_tabela}")
+
+            # Obter descrição das colunas sincrona em thread
+            colunas_desc = await asyncio.to_thread(lambda: cursor.description)
+            colunas = [col[0] for col in colunas_desc] if colunas_desc else []
 
             dados = []
-            # Usar fetchall para obter todos os resultados de uma vez (cuidado com tabelas grandes)
-            # Para tabelas muito grandes, considere fetchmany em um loop
-            rows = await cursor.fetchall()
+            # Buscar todos os resultados sincrono em thread
+            rows = await asyncio.to_thread(cursor.fetchall)
 
             for row in rows:
                 linha = {}
                 for col, val in zip(colunas, row):
-                    # Tratamento para tipos de dados LOB (BLOB, CLOB)
+                    # Tratamento para tipos de dados LOB (BLOB, CLOB) - a leitura também pode ser síncrona ou assíncrona dependendo da API e versão
+                    # Para garantir compatibilidade com a conexão SÍNCRONA, assumimos leitura SÍNCRONA
                     if val is not None and hasattr(val, "read"):
-                        val = await val.read()
-                        if isinstance(val, bytes):
-                            try:
-                                # Tentar decodificar bytes para utf-8 se for o caso (CLOBs binários)
-                                val = val.decode('utf-8')
-                            except UnicodeDecodeError:
-                                # Manter como bytes se não for decodificável (BLOBs)
-                                pass
+                         # Se a leitura do LOB for assíncrona (AsyncLOB), precisamos awaits.
+                         # Se for síncrona (LOB), precisamos asyncio.to_thread
+                         # Com a pool síncrona, é mais provável que seja um LOB síncrono.
+                         # Vamos usar asyncio.to_thread para a leitura para sermos seguros.
+                        try:
+                            val = await asyncio.to_thread(val.read)
+                            if isinstance(val, bytes):
+                                try:
+                                    val = val.decode('utf-8')
+                                except UnicodeDecodeError:
+                                    pass # Manter como bytes se não decodificar
+                        except Exception as read_error:
+                             print(f"Erro ao ler LOB para coluna {col}: {read_error}")
+                             val = None # Define como None ou trata o erro adequadamente
 
                     linha[col] = val
                 dados.append(linha)
+
+            # Fechar cursor síncrono em thread
+            await asyncio.to_thread(cursor.close)
 
             # A conexão é liberada automaticamente pela dependência após o retorno
             return dados
 
         except Exception as e:
+            # Certificar que o cursor é fechado em caso de erro antes de levantar a exceção
+            if cursor:
+                try:
+                    await asyncio.to_thread(cursor.close)
+                except Exception as close_error:
+                    print(f"Erro ao fechar cursor após erro na query: {close_error}")
+
             # Tratar erros na execução da query
             print(f"Erro ao listar tabela {nome_tabela}: {e}")
             # A conexão será liberada pelo finally da dependência
             raise HTTPException(status_code=400, detail=f"Erro ao acessar dados da tabela {nome_tabela}: {e}")
+    except Exception as e:
+        # Captura erros na criação do cursor ou outras operações antes da query
+        print(f"Erro durante o processamento da requisição para {nome_tabela}: {e}")
+        raise HTTPException(status_code=500, detail=f"Erro interno no servidor: {e}")
