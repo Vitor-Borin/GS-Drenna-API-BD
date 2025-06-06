@@ -28,7 +28,7 @@ db_pool = None
 async def startup_db_pool():
     global db_pool
     try:
-        db_pool = await oracledb.create_pool(
+        db_pool = oracledb.create_pool(
             user=os.getenv("ORACLE_USER"),
             password=os.getenv("ORACLE_PASSWORD"),
             dsn=oracledb.makedsn(
