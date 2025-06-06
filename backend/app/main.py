@@ -60,7 +60,9 @@ async def listar_tabela(nome_tabela: str):
     if nome_tabela not in tabelas_permitidas:
         raise HTTPException(status_code=403, detail="Tabela não permitida")
 
-    async with db_pool.acquire() as connection:
+    connection = None
+    try:
+        connection = await db_pool.acquire()
         async with connection.cursor() as cursor:
             try:
                 await cursor.execute(f"SELECT * FROM {nome_tabela}")
@@ -86,4 +88,7 @@ async def listar_tabela(nome_tabela: str):
             except Exception as e:
                 print(f"Erro ao listar tabela {nome_tabela}:", e)
                 raise HTTPException(status_code=400, detail=f"Erro ao acessar dados da tabela {nome_tabela}: {e}")
+    finally:
+        if connection:
+            await connection.release()
 
