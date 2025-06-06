@@ -78,6 +78,7 @@ async def get_db_connection():
              raise HTTPException(status_code=500, detail="Database connection pool not initialized.")
         # Adquirir a conexão da pool síncrona rodando em um thread
         connection = await asyncio.to_thread(db_pool.acquire)
+        print(f"Tipo de objeto de conexão adquirido: {type(connection)}")
         yield connection # Fornece a conexão para o endpoint
     except Exception as e:
         # Tratar erros na aquisição da conexão
